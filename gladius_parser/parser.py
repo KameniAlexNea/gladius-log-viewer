@@ -258,6 +258,7 @@ def _build_tree(events: list[Event]) -> RootNode:
     current: AgentNode | None = None
     seen_task: bool = False
     last_tool_was_sub: bool = False
+    last_todo_was_sub: bool = False
     # Buffers root-level events that must appear AFTER the current AgentNode.
     pending_root: list[Event] = []
 
@@ -278,6 +279,7 @@ def _build_tree(events: list[Event]) -> RootNode:
             _flush_agent()
             current = AgentNode(task_event=ev)
             last_tool_was_sub = False
+            last_todo_was_sub = False
             seen_task = True
             continue
 
@@ -297,6 +299,19 @@ def _build_tree(events: list[Event]) -> RootNode:
             # RESULT_*: inherit ownership from the preceding TOOL_USE.
             elif ev.kind in (RESULT_OK, RESULT_ERR, RESULT_CONT):
                 if last_tool_was_sub:
+                    current.events.append(ev)
+                else:
+                    pending_root.append(ev)
+            # TODO_WRITE: track subagent flag for following TODO_ITEMs.
+            elif ev.kind == TODO_WRITE:
+                last_todo_was_sub = ev.is_subagent
+                if ev.is_subagent:
+                    current.events.append(ev)
+                else:
+                    pending_root.append(ev)
+            # TODO_ITEM: inherit ownership from the preceding TODO_WRITE.
+            elif ev.kind == TODO_ITEM:
+                if last_todo_was_sub:
                     current.events.append(ev)
                 else:
                     pending_root.append(ev)

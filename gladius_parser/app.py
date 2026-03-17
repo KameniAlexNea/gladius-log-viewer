@@ -19,6 +19,7 @@ Usage:
 
 from __future__ import annotations
 
+import dataclasses
 import html
 import json
 import re
@@ -135,6 +136,52 @@ def _group_results(events: list[Event]) -> list[Event | list[Event]]:
             out.append(ev)
     if current is not None:
         out.append(current)
+    return out
+
+
+_MERGE_KINDS = {MESSAGE, THINKING}
+
+def _extract_text(ev: Event) -> str:
+    """Extract the human-readable payload from a MESSAGE or THINKING event."""
+    if ev.kind == MESSAGE:
+        m = re.search(r"💬 \[gladius\][\S]* (.*)", ev.text, re.DOTALL)
+        return m.group(1).strip() if m else ev.text
+    if ev.kind == THINKING:
+        m = re.search(r"\(thinking\)(.*)", ev.text, re.DOTALL)
+        return m.group(1).strip() if m else ev.text
+    return ev.text
+
+
+def _merge_consecutive(
+    items: list[Event | list[Event]],
+) -> list[Event | list[Event]]:
+    """Collapse runs of consecutive MESSAGE or THINKING single-events into one.
+
+    Adjacent lines that are the same kind and same is_subagent flag are joined
+    so they render as a single row instead of many fragmented ones.
+    """
+    out: list[Event | list[Event]] = []
+    for item in items:
+        if (
+            isinstance(item, Event)
+            and item.kind in _MERGE_KINDS
+            and out
+            and isinstance(out[-1], Event)
+            and out[-1].kind == item.kind
+            and out[-1].is_subagent == item.is_subagent
+        ):
+            prev = out[-1]
+            joined = _extract_text(prev) + " " + _extract_text(item)
+            # Rebuild a synthetic text that the existing renderers can parse.
+            if item.kind == MESSAGE:
+                badge = " ➣subagent" if item.is_subagent else ""
+                new_text = f"💬 [gladius]{badge} {joined}"
+            else:  # THINKING
+                badge = " ➣subagent" if item.is_subagent else ""
+                new_text = f"🧠 [gladius]{badge} (thinking) {joined}"
+            out[-1] = dataclasses.replace(prev, text=new_text)
+        else:
+            out.append(item)
     return out
 
 # ═══════════════════════════════════════════ ROW RENDERERS ════════════════════
@@ -275,7 +322,7 @@ def _render_event(item: Event | list[Event]) -> str:
     return fn(item)
 
 def _render_events(events: list[Event]) -> str:
-    grouped = _group_results(events)
+    grouped = _merge_consecutive(_group_results(events))
     return "".join(_render_event(item) for item in grouped)
 
 # ═══════════════════════════════════════════ AGENT NODE BLOCK ═════════════════
@@ -352,15 +399,24 @@ def _render_root(root: RootNode) -> str:
         body_parts.append('<div class="lv-section-lbl">startup</div>')
         body_parts.append(_render_events(root.preamble))
 
-    # Children: interleaved AgentNodes and root-level Events
+    # Children: interleaved AgentNodes and root-level Events.
+    # Batch consecutive Events together so _merge_consecutive can join them.
+    ev_run: list[Event] = []
+
+    def _flush_ev_run() -> None:
+        if ev_run:
+            body_parts.append(_render_events(ev_run))
+            ev_run.clear()
+
     for child in root.children:
         if isinstance(child, AgentNode):
+            _flush_ev_run()
             colour = _agent_colour(child.agent_name, colour_map)
             idx    = len(colour_map) - 1
             body_parts.append(_render_agent_node(child, colour, idx))
         else:
-            # Root-level event between tasks
-            body_parts.append(_render_events([child]))
+            ev_run.append(child)
+    _flush_ev_run()
 
     # Epilogue
     if root.epilogue:

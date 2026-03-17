@@ -496,6 +496,89 @@ class TestSubagentOwnEvents:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# Subagent TODO items must follow their TODO_WRITE into the AgentNode
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestSubagentTodoItems:
+    def test_subagent_todo_items_stay_in_agent(self):
+        """TODO_ITEM lines (lineno 143) carry no ➣subagent marker but must stay
+        inside the agent whose TODO_WRITE preceded them."""
+        root = parse_log(log(
+            mk_task("00:01:00.000", "agent-a"),
+            mk_sub_tool("00:01:05.000"),
+            mk_result_ok("00:01:06.000"),
+            mk_todo_write("00:01:10.000", 3, sub=True),   # is_sub=True
+            mk_todo_item("00:01:10.001", "step 1"),        # is_sub=False in raw log
+            mk_todo_item("00:01:10.002", "step 2"),
+            mk_todo_item("00:01:10.003", "step 3"),
+            mk_sub_tool("00:01:20.000"),
+            mk_result_ok("00:01:21.000"),
+            mk_task("00:02:00.000", "agent-b"),
+            mk_status(),
+        ))
+        node_a = agents(root)[0]
+        tw = [e for e in node_a.events if e.kind == TODO_WRITE]
+        ti = [e for e in node_a.events if e.kind == TODO_ITEM]
+        assert len(tw) == 1
+        assert len(ti) == 3
+
+    def test_subagent_todo_items_not_in_root_children(self):
+        root = parse_log(log(
+            mk_task("00:01:00.000", "agent-a"),
+            mk_todo_write("00:01:10.000", 2, sub=True),
+            mk_todo_item("00:01:10.001", "step 1"),
+            mk_todo_item("00:01:10.002", "step 2"),
+            mk_task("00:02:00.000", "agent-b"),
+            mk_status(),
+        ))
+        leaked = [c for c in root.children
+                  if isinstance(c, Event) and c.kind == TODO_ITEM]
+        assert leaked == []
+
+    def test_todo_items_appear_after_todo_write_in_agent_events(self):
+        """Ordering within the agent: TODO_WRITE must precede its items."""
+        root = parse_log(log(
+            mk_task("00:01:00.000", "agent-a"),
+            mk_sub_tool("00:01:05.000", "Read"),
+            mk_result_ok("00:01:06.000"),
+            mk_todo_write("00:01:10.000", 2, sub=True),
+            mk_todo_item("00:01:10.001", "step 1"),
+            mk_todo_item("00:01:10.002", "step 2"),
+            mk_result_ok("00:01:30.000", "agentId: abc123"),
+            mk_task("00:02:00.000", "agent-b"),
+            mk_status(),
+        ))
+        node_a = agents(root)[0]
+        kinds = [e.kind for e in node_a.events]
+        tw_idx = kinds.index(TODO_WRITE)
+        ti_idxs = [i for i, k in enumerate(kinds) if k == TODO_ITEM]
+        result_idx = kinds.index(RESULT_OK, tw_idx + 1)  # the agentId result
+        # todo_write comes before todo_items, which come before the final result
+        assert all(tw_idx < i for i in ti_idxs)
+        assert all(i < result_idx for i in ti_idxs)
+
+    def test_root_todo_items_stay_in_root(self):
+        """Root-level TODO_WRITE (no ➣subagent) keeps its items in root.children."""
+        root = parse_log(log(
+            mk_task("00:01:00.000", "agent-a"),
+            mk_sub_tool("00:01:05.000"),
+            mk_result_ok("00:01:06.000"),
+            mk_todo_write("00:01:20.000", 2, sub=False),   # root-level
+            mk_todo_item("00:01:20.001", "root step 1"),
+            mk_todo_item("00:01:20.002", "root step 2"),
+            mk_task("00:02:00.000", "agent-b"),
+            mk_status(),
+        ))
+        # Items must NOT be in agent-a
+        node_a = agents(root)[0]
+        assert sum(1 for e in node_a.events if e.kind == TODO_ITEM) == 0
+        # Items must appear in root.children between the two agents
+        root_items = [c for c in root.children
+                      if isinstance(c, Event) and c.kind == TODO_ITEM]
+        assert len(root_items) == 2
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # STATUS per-iteration: must NOT permanently lock into epilogue
 # ═══════════════════════════════════════════════════════════════════════════════
 
