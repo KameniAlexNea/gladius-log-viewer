@@ -496,6 +496,138 @@ class TestSubagentOwnEvents:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# STATUS per-iteration: must NOT permanently lock into epilogue
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class TestMultiIterationStatus:
+    def test_status_between_iterations_appears_in_children_not_epilogue(self):
+        """STATUS within a multi-iteration run sits between agents in root.children."""
+        root = parse_log(log(
+            mk_task("00:01:00.000", "agent-a"),
+            mk_sub_tool("00:01:10.000"),
+            mk_result_ok("00:01:11.000"),
+            mk_status("00:02:00.000"),          # end of iteration 1
+            mk_agent_start("00:02:01.000"),     # start of iteration 2
+            mk_session("00:02:02.000"),
+            mk_task("00:02:03.000", "agent-b"),
+            mk_status("00:03:00.000"),          # end of iteration 2 (final)
+        ))
+        ch_kinds = child_kinds(root)
+        # Inter-iteration STATUS and iter-2 boundary events in root.children
+        assert STATUS in ch_kinds
+        assert AGENT_START in ch_kinds
+        assert SESSION in ch_kinds
+
+    def test_agent_start_after_inter_iteration_status_not_in_epilogue(self):
+        root = parse_log(log(
+            mk_task("00:01:00.000", "agent-a"),
+            mk_sub_tool("00:01:10.000"),
+            mk_result_ok("00:01:11.000"),
+            mk_status("00:02:00.000"),
+            mk_agent_start("00:02:01.000"),
+            mk_session("00:02:02.000"),
+            mk_task("00:02:03.000", "agent-b"),
+            mk_status("00:03:00.000"),
+        ))
+        # AGENT_START / SESSION between iterations must not end up in epilogue
+        assert all(e.kind not in (AGENT_START, SESSION) for e in root.epilogue)
+
+    def test_ordering_with_intermediate_status(self):
+        """children: [agent-iter1, STATUS, AGENT_START, SESSION, agent-iter2]"""
+        root = parse_log(log(
+            mk_task("00:01:00.000", "ml-engineer", "iter1"),
+            mk_sub_tool("00:01:10.000"),
+            mk_result_ok("00:01:11.000"),
+            mk_status("00:02:00.000"),
+            mk_agent_start("00:02:01.000"),
+            mk_session("00:02:02.000"),
+            mk_task("00:02:03.000", "ml-engineer", "iter2"),
+            mk_status("00:03:00.000"),
+        ))
+        assert child_kinds(root) == [
+            "agent:ml-engineer",
+            STATUS,
+            AGENT_START,
+            SESSION,
+            "agent:ml-engineer",
+        ]
+
+    def test_final_status_goes_to_epilogue(self):
+        """The last STATUS (and nothing after it) is promoted to root.epilogue."""
+        root = parse_log(log(
+            mk_task("00:01:00.000", "agent-a"),
+            mk_sub_tool("00:01:10.000"),
+            mk_result_ok("00:01:11.000"),
+            mk_status("00:02:00.000"),
+        ))
+        assert len(root.epilogue) == 1
+        assert root.epilogue[0].kind == STATUS
+        # Must not also appear in children
+        assert STATUS not in child_kinds(root)
+
+    def test_final_status_and_warning_go_to_epilogue(self):
+        root = parse_log(log(
+            mk_task("00:01:00.000", "agent-a"),
+            mk_sub_tool("00:01:10.000"),
+            mk_result_ok("00:01:11.000"),
+            mk_status("00:02:00.000"),
+            _line("00:02:01.000", "WARNING", "gladius.sdk", "run", 99,
+                  "forbidden tool attempt was blocked"),
+        ))
+        epilogue_kinds = [e.kind for e in root.epilogue]
+        assert STATUS in epilogue_kinds
+        assert WARNING in epilogue_kinds
+
+    def test_three_iterations_all_produce_distinct_agents(self):
+        root = parse_log(log(
+            mk_task("00:01:00.000", "ml-engineer", "iter1"),
+            mk_sub_tool("00:01:10.000"),
+            mk_result_ok("00:01:11.000"),
+            mk_status("00:02:00.000"),
+            mk_agent_start("00:02:01.000"),
+            mk_session("00:02:02.000"),
+            mk_task("00:02:03.000", "ml-engineer", "iter2"),
+            mk_sub_tool("00:02:10.000"),
+            mk_result_ok("00:02:11.000"),
+            mk_status("00:03:00.000"),
+            mk_agent_start("00:03:01.000"),
+            mk_session("00:03:02.000"),
+            mk_task("00:03:03.000", "ml-engineer", "iter3"),
+            mk_sub_tool("00:03:10.000"),
+            mk_result_ok("00:03:11.000"),
+            mk_status("00:04:00.000"),
+        ))
+        ml_agents = [n for n in agents(root) if n.agent_name == "ml-engineer"]
+        assert len(ml_agents) == 3
+        for node in ml_agents:
+            assert len(node.events) == 2  # exactly its own tool + result
+
+    def test_iter2_agent_events_not_merged_with_iter1(self):
+        """Most important: iter-2 subagent tool calls must NOT appear in iter-1 agent."""
+        root = parse_log(log(
+            mk_task("00:01:00.000", "ml-engineer", "iter1"),
+            mk_sub_tool("00:01:10.000", "Read"),
+            mk_result_ok("00:01:11.000", "iter1 result"),
+            mk_status("00:02:00.000"),
+            mk_agent_start("00:02:01.000"),
+            mk_session("00:02:02.000"),
+            mk_task("00:02:03.000", "ml-engineer", "iter2"),
+            mk_sub_tool("00:02:10.000", "Bash"),
+            mk_result_ok("00:02:11.000", "iter2 result"),
+            mk_status("00:03:00.000"),
+        ))
+        iter1, iter2 = [n for n in agents(root) if n.agent_name == "ml-engineer"]
+        # iter1 has only its Read tool + result
+        assert iter1.n_tools == 1
+        assert iter1.events[0].text.endswith('"arg": "val"}')  # Read
+        # iter2 has only its Bash tool + result
+        assert iter2.n_tools == 1
+        # No cross-contamination
+        assert len(iter1.events) == 2
+        assert len(iter2.events) == 2
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # Counters
 # ═══════════════════════════════════════════════════════════════════════════════
 

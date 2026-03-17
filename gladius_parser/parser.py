@@ -232,12 +232,15 @@ def _build_tree(events: list[Event]) -> RootNode:
     """
     State machine that assembles a RootNode from the flat event list.
 
-    Phases:
-      preamble   — before the first Task →
-      task       — inside an AgentNode (until next Task → or STATUS)
-      epilogue   — after STATUS or after last event
+    There is no "epilogue phase" — STATUS events occur once per iteration, not
+    just at the end of the whole run.  Instead we use two states:
+
+      seen_task=False  — preamble: events before any Task dispatch
+      seen_task=True   — events between / inside agent dispatches
+
+    At the end, any trailing non-AgentNode entries in root.children are peeled
+    off into root.epilogue so the renderer can give them a distinct label.
     """
-    # Discover the root agent name from the AGENT_LAUNCH event
     agent_name = "gladius"
     for ev in events:
         if ev.kind == AGENT_LAUNCH:
@@ -253,15 +256,12 @@ def _build_tree(events: list[Event]) -> RootNode:
     )
 
     current: AgentNode | None = None
-    phase = "preamble"
+    seen_task: bool = False
     last_tool_was_sub: bool = False
-    # Root-level thinking/messages emitted while a subagent is "active" belong
-    # to the orchestrator resuming after the subagent returns.  Buffer them so
-    # they can be flushed AFTER the AgentNode is appended, preserving log order.
+    # Buffers root-level events that must appear AFTER the current AgentNode.
     pending_root: list[Event] = []
 
     def _flush_agent() -> None:
-        """Append current AgentNode, then its trailing root-level events."""
         nonlocal current
         if current is not None:
             root.children.append(current)
@@ -273,50 +273,52 @@ def _build_tree(events: list[Event]) -> RootNode:
         if ev.kind == OTHER:
             continue
 
-        # A new Task → always opens a new AgentNode, closing the previous one
+        # Every Task dispatch closes the previous agent and opens a new one.
         if ev.kind == TASK:
             _flush_agent()
             current = AgentNode(task_event=ev)
             last_tool_was_sub = False
-            phase = "task"
+            seen_task = True
             continue
 
-        # STATUS ends the task phase
-        if ev.kind == STATUS:
-            _flush_agent()
-            root.epilogue.append(ev)
-            phase = "epilogue"
-            continue
-
-        if phase == "preamble":
+        if not seen_task:
+            # Preamble: before the very first Task dispatch.
             root.preamble.append(ev)
-        elif phase == "task" and current is not None:
-            # Decide ownership: result events (OK/ERR/CONT) inherit the
-            # is_subagent flag of the tool_use that preceded them in the log,
-            # because the raw result lines never carry the ➣subagent marker.
-            # We track the last tool_use owner in `last_tool_was_sub`.
+
+        elif current is not None:
+            # ── Inside an AgentNode ──────────────────────────────────────────
+            # TOOL_USE: subagent calls stay in the agent; root calls buffer.
             if ev.kind == TOOL_USE:
                 last_tool_was_sub = ev.is_subagent
                 if ev.is_subagent:
                     current.events.append(ev)
                 else:
                     pending_root.append(ev)
+            # RESULT_*: inherit ownership from the preceding TOOL_USE.
             elif ev.kind in (RESULT_OK, RESULT_ERR, RESULT_CONT):
                 if last_tool_was_sub:
                     current.events.append(ev)
                 else:
                     pending_root.append(ev)
-            elif not ev.is_subagent:
-                # THINKING, MESSAGE, TODO_WRITE, TODO_ITEM, AGENT_START,
-                # SESSION, AGENT_LAUNCH — all root-orchestrator events.
-                pending_root.append(ev)
-            else:
+            # Subagent-tagged events (thinking, message…) belong to the agent.
+            elif ev.is_subagent:
                 current.events.append(ev)
+            else:
+                # All orchestrator-level events (THINKING, MESSAGE, TODO_*,
+                # STATUS, AGENT_START, SESSION, AGENT_LAUNCH, WARNING…)
+                # must appear in root.children *after* the AgentNode.
+                pending_root.append(ev)
+
         else:
-            root.epilogue.append(ev) if ev.kind in (WARNING, AGENT_LAUNCH, AGENT_START, SESSION) \
-                else root.children.append(ev)
+            # ── Between agents (after STATUS or before next Task) ────────────
+            pending_root.append(ev)
 
     _flush_agent()
+
+    # Peel trailing non-agent events from root.children into root.epilogue so
+    # the renderer can give them a distinct "epilogue" label.
+    while root.children and isinstance(root.children[-1], Event):
+        root.epilogue.insert(0, root.children.pop())
 
     return root
 
