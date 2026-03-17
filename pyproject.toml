@@ -6,3 +6,8 @@ requires-python = ">=3.10"
 dependencies = [
     "gradio>=4.0",
 ]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+]

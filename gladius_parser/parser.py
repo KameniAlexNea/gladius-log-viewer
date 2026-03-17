@@ -297,7 +297,10 @@ def _build_tree(events: list[Event]) -> RootNode:
             # We track the last tool_use owner in `last_tool_was_sub`.
             if ev.kind == TOOL_USE:
                 last_tool_was_sub = ev.is_subagent
-                current.events.append(ev)
+                if ev.is_subagent:
+                    current.events.append(ev)
+                else:
+                    pending_root.append(ev)
             elif ev.kind in (RESULT_OK, RESULT_ERR, RESULT_CONT):
                 if last_tool_was_sub:
                     current.events.append(ev)
