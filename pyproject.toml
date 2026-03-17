@@ -1,0 +1,11 @@
+[project]
+name = "gladius-log-viewer"
+version = "0.1.0"
+description = "Gradio-based visualizer for gladius agent execution logs"
+requires-python = ">=3.10"
+dependencies = [
+    "gradio>=4.0",
+]
+
+[project.scripts]
+gladius-log-viewer = "app:_build_ui"
