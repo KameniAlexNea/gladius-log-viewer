@@ -436,7 +436,7 @@ def render_log(content: str) -> str:
 
 _PLACEHOLDER = (
     '<div style="padding:60px;text-align:center;color:#94a3b8;font-family:sans-serif">'
-    "Enter the path to a <code>gladius.log</code> file and click <b>Load</b> or press Enter."
+    "Enter the path to a <code>gladius.log</code> file and click <b>Load</b>, press Enter, or upload a file."
     "</div>"
 )
 
@@ -454,6 +454,17 @@ def load_log(path: str) -> str:
     return render_log(content)
 
 
+def load_upload(file_path: str | None) -> str:
+    """Handler for the file upload component."""
+    if not file_path:
+        return _PLACEHOLDER
+    try:
+        content = Path(file_path).read_text(errors="replace")
+    except Exception as exc:
+        return f'<p style="color:#dc2626;padding:20px">Error reading file: {_e(str(exc))}</p>'
+    return render_log(content)
+
+
 def build_ui(default_path: str = "") -> gr.Blocks:
     with gr.Blocks(title="Gladius Log Viewer") as demo:
         gr.Markdown("## 🔍 Gladius Log Viewer")
@@ -463,9 +474,16 @@ def build_ui(default_path: str = "") -> gr.Blocks:
                 placeholder="/path/to/gladius.log", scale=6,
             )
             load_btn = gr.Button("Load", variant="primary", scale=1)
+        with gr.Row():
+            upload_box = gr.File(
+                label="Or upload a log file",
+                file_types=[".log", ".txt"],
+                type="filepath",
+            )
         output = gr.HTML(value=_PLACEHOLDER)
         load_btn.click(fn=load_log, inputs=path_box, outputs=output)
         path_box.submit(fn=load_log, inputs=path_box, outputs=output)
+        upload_box.change(fn=load_upload, inputs=upload_box, outputs=output)
         if default_path:
             demo.load(fn=lambda: load_log(default_path), outputs=output)
     return demo
