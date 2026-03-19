@@ -79,14 +79,14 @@ class AgentNode:
 
     @property
     def agent_name(self) -> str:
-        m = re.search(r"Task → ([\w\-]+)", self.task_event.text)
+        m = re.search(r"Task \u2192 (\S+)", self.task_event.text)
         return m.group(1) if m else "?"
 
     @property
     def title(self) -> str:
         # The text looks like: 🤖 [gladius] Task → agent-name  [TITLE]  desc...
         # We want the LAST [...] that comes after the agent name.
-        after = re.sub(r".*Task → [\w\-]+\s*", "", self.task_event.text)
+        after = re.sub(r".*Task \u2192 \S+\s*", "", self.task_event.text)
         m = re.search(r"\[([^\]]*)\]", after)
         return m.group(1) if m else ""
 
