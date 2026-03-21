@@ -73,20 +73,20 @@ class Event:
 
 @dataclass
 class AgentNode:
-    """A named-agent invocation spawned by a Task → dispatch."""
+    """A named-agent invocation spawned by a Task/Agent dispatch."""
     task_event: Event
     events: list[Event] = field(default_factory=list)
 
     @property
     def agent_name(self) -> str:
-        m = re.search(r"Task \u2192 (\S+)", self.task_event.text)
+        m = re.search(r"(?:Task|Agent) \u2192 (\S+)", self.task_event.text)
         return m.group(1) if m else "?"
 
     @property
     def title(self) -> str:
-        # The text looks like: 🤖 [gladius] Task → agent-name  [TITLE]  desc...
+        # The text looks like: 🤖 [gladius] Task/Agent → agent-name  [TITLE] ...
         # We want the LAST [...] that comes after the agent name.
-        after = re.sub(r".*Task \u2192 \S+\s*", "", self.task_event.text)
+        after = re.sub(r".*(?:Task|Agent) \u2192 \S+\s*", "", self.task_event.text)
         m = re.search(r"\[([^\]]*)\]", after)
         return m.group(1) if m else ""
 
@@ -164,7 +164,7 @@ def _classify(lineno: int, text: str, module: str, func: str, level: str) -> tup
         return AGENT_START, False
     if "🔑" in text and "session" in text:
         return SESSION, False
-    if "🤖" in text and "Task →" in text:
+    if "🤖" in text and ("Task →" in text or "Agent →" in text):
         return TASK, False
     if "🧠" in text and "(thinking)" in text:
         return THINKING, is_sub
@@ -172,13 +172,18 @@ def _classify(lineno: int, text: str, module: str, func: str, level: str) -> tup
         return MESSAGE, is_sub
     if "📋" in text and "TodoWrite" in text:
         return TODO_WRITE, is_sub
-    if lineno == 143:
+    if lineno == 143 or (
+        func == "_log_tool_use"
+        and text.strip()
+        and text.strip()[0] in ("✅", "⬜", "🔧")
+        and "[gladius]" not in text
+    ):
         t = text.strip()
         if t and t[0] in ("✅", "⬜", "🔧"):
             return TODO_ITEM, is_sub
     if "🔧" in text and "[gladius]" in text:
         return TOOL_USE, is_sub
-    if lineno == 177:
+    if lineno == 177 or func == "_log_tool_result":
         t = text.strip()
         if t.startswith("✓"):
             return RESULT_OK, is_sub
