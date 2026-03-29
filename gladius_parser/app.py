@@ -328,6 +328,16 @@ def _render_events(events: list[Event]) -> str:
 # ═══════════════════════════════════════════ AGENT NODE BLOCK ═════════════════
 
 def _render_agent_node(node: AgentNode, colour: str, index: int) -> str:
+    if not node.events:
+        title = f" · {_e(node.title)}" if node.title else ""
+        return (
+            f'<div class="lv-agent-retry">'
+            f'<span class="retry-name">{_e(node.agent_name)}</span>'
+            f'<span>{title}</span>'
+            f'<span style="margin-left:8px;font-style:italic">↺ re-dispatched</span>'
+            f"</div>"
+        )
+
     dur   = _dur(node.duration_s)
     tools = node.n_tools
     errs  = node.n_errors
@@ -366,6 +376,70 @@ def _render_agent_node(node: AgentNode, colour: str, index: int) -> str:
 
 # ═══════════════════════════════════════════ ROOT NODE RENDER ════════════════
 
+# Inline onclick for tab buttons — self-contained, no global function needed.
+_ITER_BTN_ONCLICK = (
+    "var w=this.closest('.lv-tab-wrapper');"
+    "w.querySelectorAll('.lv-tab-btn').forEach(function(b){b.classList.remove('lv-tab-active')});"
+    "w.querySelectorAll('.lv-tab-pane').forEach(function(p){p.style.display='none'});"
+    "this.classList.add('lv-tab-active');"
+    "w.querySelector('#'+this.getAttribute('data-pane')).style.display='';"
+)
+
+
+def _split_iterations(
+    children: list,
+) -> list[list]:
+    """Group root.children into per-iteration slices, each ending at a STATUS event."""
+    groups: list[list] = []
+    current: list = []
+    for child in children:
+        current.append(child)
+        if isinstance(child, Event) and child.kind == STATUS:
+            groups.append(current)
+            current = []
+    if current:
+        groups.append(current)
+    return groups
+
+
+def _iter_label(idx: int, children: list) -> str:
+    """Short tab label for one iteration."""
+    label = f"Run {idx + 1}"
+    for child in reversed(children):
+        if isinstance(child, Event) and child.kind == STATUS:
+            m = re.search(r"status=(\S+)", _ex_status(child.text))
+            if m:
+                label += f" · {m.group(1)}"
+            break
+    return label
+
+
+
+def _render_children_section(
+    children: list,
+    colour_map: dict[str, str],
+) -> str:
+    """Render a flat list of AgentNode/Event children into HTML."""
+    parts: list[str] = []
+    ev_run: list[Event] = []
+
+    def _flush() -> None:
+        if ev_run:
+            parts.append(_render_events(list(ev_run)))
+            ev_run.clear()
+
+    for child in children:
+        if isinstance(child, AgentNode):
+            _flush()
+            colour = _agent_colour(child.agent_name, colour_map)
+            idx    = len(colour_map) - 1
+            parts.append(_render_agent_node(child, colour, idx))
+        else:
+            ev_run.append(child)
+    _flush()
+    return "".join(parts)
+
+
 def _render_root(root: RootNode) -> str:
     colour_map: dict[str, str] = {}
 
@@ -394,29 +468,48 @@ def _render_root(root: RootNode) -> str:
 
     body_parts: list[str] = []
 
-    # Preamble
-    if root.preamble:
-        body_parts.append('<div class="lv-section-lbl">startup</div>')
-        body_parts.append(_render_events(root.preamble))
+    # Preamble events belong to the first iteration tab.
+    preamble_html = _render_events(root.preamble) if root.preamble else ""
 
-    # Children: interleaved AgentNodes and root-level Events.
-    # Batch consecutive Events together so _merge_consecutive can join them.
-    ev_run: list[Event] = []
+    # Split children into per-iteration groups
+    iterations = _split_iterations(root.children)
 
-    def _flush_ev_run() -> None:
-        if ev_run:
-            body_parts.append(_render_events(ev_run))
-            ev_run.clear()
-
-    for child in root.children:
-        if isinstance(child, AgentNode):
-            _flush_ev_run()
-            colour = _agent_colour(child.agent_name, colour_map)
-            idx    = len(colour_map) - 1
-            body_parts.append(_render_agent_node(child, colour, idx))
-        else:
-            ev_run.append(child)
-    _flush_ev_run()
+    if len(iterations) <= 1:
+        # Single iteration — render inline as before
+        body_parts.append(
+            preamble_html
+            + _render_children_section(iterations[0] if iterations else [], colour_map)
+        )
+    else:
+        # Multiple iterations — render as tabs.
+        # Iteration 0: prepend preamble, keep AGENT_START/SESSION.
+        # Iterations 1+: skip AGENT_START/SESSION restart boilerplate.
+        tab_bar_parts = ['<div class="lv-tab-bar">']
+        pane_parts: list[str] = []
+        for i, iter_children in enumerate(iterations):
+            label   = _iter_label(i, iter_children)
+            pane_id = f"lv-iter-{i}"
+            active  = " lv-tab-active" if i == 0 else ""
+            display = "" if i == 0 else "display:none"
+            tab_bar_parts.append(
+                f'<button class="lv-tab-btn{active}" data-pane="{pane_id}"'
+                f' onclick="{_ITER_BTN_ONCLICK}">{_e(label)}</button>'
+            )
+            prefix = preamble_html if i == 0 else ""
+            pane_html = prefix + _render_children_section(
+                iter_children, colour_map
+            )
+            pane_parts.append(
+                f'<div class="lv-tab-pane" id="{pane_id}" style="{display}">'
+                f'{pane_html}</div>'
+            )
+        tab_bar_parts.append("</div>")
+        body_parts.append(
+            '<div class="lv-tab-wrapper">'
+            + "".join(tab_bar_parts)
+            + "".join(pane_parts)
+            + "</div>"
+        )
 
     # Epilogue
     if root.epilogue:
@@ -440,29 +533,35 @@ _PLACEHOLDER = (
     "</div>"
 )
 
-def load_log(path: str) -> str:
-    path = path.strip()
-    if not path:
-        return _PLACEHOLDER
-    p = Path(path)
-    if not p.exists():
-        return f'<p style="color:#dc2626;padding:20px">File not found: {_e(path)}</p>'
-    try:
-        content = p.read_text(errors="replace")
-    except Exception as exc:
-        return f'<p style="color:#dc2626;padding:20px">Error reading file: {_e(str(exc))}</p>'
-    return render_log(content)
+# Maximum number of iteration tabs to pre-create in the UI.
+MAX_ITER = 12
 
 
-def load_upload(file_path: str | None) -> str:
-    """Handler for the file upload component."""
-    if not file_path:
-        return _PLACEHOLDER
-    try:
-        content = Path(file_path).read_text(errors="replace")
-    except Exception as exc:
-        return f'<p style="color:#dc2626;padding:20px">Error reading file: {_e(str(exc))}</p>'
-    return render_log(content)
+def _render_header_html(root: RootNode) -> str:
+    """Stats header bar as standalone HTML. Also injects CSS once for the whole page."""
+    stat_parts: list[str] = []
+
+    def stat(n, label: str, colour: str = "") -> None:
+        style = f' style="color:{colour}"' if colour else ""
+        stat_parts.append(
+            f'<div class="lv-stat">'
+            f'<span class="lv-stat-n"{style}>{_e(str(n))}</span>'
+            f'<span class="lv-stat-lbl">{_e(label)}</span>'
+            f"</div>"
+        )
+
+    stat(_dur(root.duration_s), "duration")
+    stat(root.n_tasks, "tasks")
+    stat(root.n_tools_total, "tool calls")
+    if root.n_errors_total:
+        stat(root.n_errors_total, "errors", "#f87171")
+    return (
+        _CSS
+        + f'<div class="lv-header">'
+        f'<span class="lv-header-title">🚀 {_e(root.agent_name)}</span>'
+        + "".join(stat_parts)
+        + "</div>"
+    )
 
 
 def build_ui(default_path: str = "") -> gr.Blocks:
@@ -480,11 +579,125 @@ def build_ui(default_path: str = "") -> gr.Blocks:
                 file_types=[".log", ".txt"],
                 type="filepath",
             )
-        output = gr.HTML(value=_PLACEHOLDER)
-        load_btn.click(fn=load_log, inputs=path_box, outputs=output)
-        path_box.submit(fn=load_log, inputs=path_box, outputs=output)
-        upload_box.change(fn=load_upload, inputs=upload_box, outputs=output)
+
+        # Stats header (with CSS injection) — shown after a log is loaded.
+        header_out = gr.HTML(value=_PLACEHOLDER)
+        # Preamble (startup events), shown only when present.
+        preamble_out = gr.HTML(value="", visible=False)
+
+        # Pre-create MAX_ITER native Gradio tabs; unused ones are hidden.
+        tab_objs: list[gr.Tab] = []
+        html_objs: list[gr.HTML] = []
+        with gr.Column(visible=False) as tabs_col:
+            with gr.Tabs():
+                for i in range(MAX_ITER):
+                    with gr.Tab(f"Run {i + 1}", visible=False) as t:
+                        h = gr.HTML(value="")
+                    tab_objs.append(t)
+                    html_objs.append(h)
+
+        # Epilogue (post-run events), shown only when present.
+        epilogue_out = gr.HTML(value="", visible=False)
+
+        # ── inner helpers ────────────────────────────────────────────────────
+
+        def _process(content: str) -> list:
+            root = parse_log(content)
+            colour_map: dict[str, str] = {}
+
+            # Preamble folds into tab 0 — no separate section above the tabs.
+            preamble_html = _render_events(root.preamble) if root.preamble else ""
+
+            epilogue_html = ""
+            if root.epilogue:
+                epilogue_html = (
+                    '<div class="lv-section-lbl">epilogue</div>'
+                    + _render_events(root.epilogue)
+                )
+
+            iterations = _split_iterations(root.children)
+            tab_updates: list = []
+            html_updates: list = []
+            for i in range(MAX_ITER):
+                if i < len(iterations):
+                    label = _iter_label(i, iterations[i])
+                    prefix = preamble_html if i == 0 else ""
+                    html = (
+                        '<div class="lv">'
+                        + prefix
+                        + _render_children_section(
+                            iterations[i], colour_map
+                        )
+                        + "</div>"
+                    )
+                    tab_updates.append(gr.update(visible=True, label=label))
+                    html_updates.append(gr.update(value=html))
+                else:
+                    tab_updates.append(gr.update(visible=False, label=f"Run {i + 1}"))
+                    html_updates.append(gr.update(value=""))
+
+            return (
+                [_render_header_html(root)]
+                + [gr.update(value="", visible=False)]  # preamble_out always hidden
+                + [gr.update(visible=bool(iterations))]
+                + tab_updates
+                + html_updates
+                + [gr.update(value=epilogue_html, visible=bool(epilogue_html))]
+            )
+
+        def _empty_updates() -> list:
+            return (
+                [_PLACEHOLDER]
+                + [gr.update(value="", visible=False)]
+                + [gr.update(visible=False)]
+                + [gr.update(visible=False, label=f"Run {i + 1}") for i in range(MAX_ITER)]
+                + [gr.update(value="") for _ in range(MAX_ITER)]
+                + [gr.update(value="", visible=False)]
+            )
+
+        def _err_updates(msg: str) -> list:
+            return (
+                [msg]
+                + [gr.update(value="", visible=False)]
+                + [gr.update(visible=False)]
+                + [gr.update(visible=False, label=f"Run {i + 1}") for i in range(MAX_ITER)]
+                + [gr.update(value="") for _ in range(MAX_ITER)]
+                + [gr.update(value="", visible=False)]
+            )
+
+        def _handle_path(path: str) -> list:
+            path = path.strip()
+            if not path:
+                return _empty_updates()
+            p = Path(path)
+            if not p.exists():
+                return _err_updates(
+                    f'<p style="color:#dc2626;padding:20px">File not found: {_e(path)}</p>'
+                )
+            try:
+                content = p.read_text(errors="replace")
+            except Exception as exc:
+                return _err_updates(
+                    f'<p style="color:#dc2626;padding:20px">Error reading file: {_e(str(exc))}</p>'
+                )
+            return _process(content)
+
+        def _handle_upload(file_path: str | None) -> list:
+            if not file_path:
+                return _empty_updates()
+            try:
+                content = Path(file_path).read_text(errors="replace")
+            except Exception as exc:
+                return _err_updates(
+                    f'<p style="color:#dc2626;padding:20px">Error reading file: {_e(str(exc))}</p>'
+                )
+            return _process(content)
+
+        outputs = [header_out, preamble_out, tabs_col] + tab_objs + html_objs + [epilogue_out]
+        load_btn.click(fn=_handle_path, inputs=path_box, outputs=outputs)
+        path_box.submit(fn=_handle_path, inputs=path_box, outputs=outputs)
+        upload_box.change(fn=_handle_upload, inputs=upload_box, outputs=outputs)
         if default_path:
-            demo.load(fn=lambda: load_log(default_path), outputs=output)
+            demo.load(fn=lambda: _handle_path(default_path), outputs=outputs)
     return demo
 

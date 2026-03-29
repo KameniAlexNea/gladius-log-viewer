@@ -47,6 +47,11 @@ def mk_task(t: str, agent: str, title: str = "work"):
                  f"  \U0001f916 [gladius] Task \u2192 {agent}  [{title}]  description")
 
 
+def mk_agent_dispatch(t: str, agent: str, title: str = "work"):
+    return _line(t, "DEBUG", "gladius.roles._console", "_log_tool_use", 168,
+                 f"  \U0001f916 [gladius] Agent \u2192 {agent}  [{title}]  description")
+
+
 def mk_sub_tool(t: str, name: str = "Read"):
     return _line(t, "DEBUG", "gladius.roles._console", "_log_tool_use", 165,
                  f'  \U0001f527 [gladius] \u27a3subagent {name}  {{"arg": "val"}}')
@@ -167,6 +172,15 @@ class TestBasicTree:
         node = agents(root)[0]
         assert node.agent_name == "team-lead"
         assert node.title == "plan baseline"
+
+    def test_agent_dispatch_name_and_title(self):
+        root = parse_log(log(
+            mk_agent_dispatch("00:01:00.000", "scout", "scout explores data"),
+            mk_status(),
+        ))
+        node = agents(root)[0]
+        assert node.agent_name == "scout"
+        assert node.title == "scout explores data"
 
     def test_subagent_events_collected_in_agent(self):
         root = parse_log(log(

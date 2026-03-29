@@ -160,6 +160,37 @@ details.lv-col[open] > summary::before { content: "▼ "; font-size: 9px; }
 .item-done { color: #047857; }
 .item-curr { color: #b45309; }
 .item-pend { color: var(--r-dim); }
+
+/* ── empty (retry) agent ── */
+.lv-agent-retry {
+  border-left: 3px solid #cbd5e1;
+  padding: 4px 14px;
+  color: #94a3b8;
+  font-size: 11px;
+  background: #f8fafc;
+  border-bottom: 1px solid #f1f5f9;
+}
+.lv-agent-retry .retry-name {
+  font-weight: 700; color: #94a3b8;
+}
+
+/* ── iteration tabs ── */
+.lv-tab-bar {
+  display: flex; gap: 0; padding: 0 8px;
+  border-bottom: 2px solid var(--r-border);
+  background: #f8fafc;
+  overflow-x: auto; flex-wrap: nowrap;
+}
+.lv-tab-btn {
+  padding: 8px 18px;
+  font-family: inherit; font-size: 12px; font-weight: 600;
+  cursor: pointer; border: none;
+  border-bottom: 3px solid transparent; margin-bottom: -2px;
+  background: transparent; color: #64748b;
+  white-space: nowrap;
+}
+.lv-tab-btn:hover { color: #1e293b; background: #f1f5f9; }
+.lv-tab-active { color: #3b82f6 !important; border-bottom-color: #3b82f6 !important; }
 </style>"""
 
 
