@@ -28,7 +28,7 @@ from pathlib import Path
 import gradio as gr
 
 from .parser import (
-    AGENT_LAUNCH, AGENT_START, MESSAGE, OTHER,
+    AGENT_START, MESSAGE, OTHER,
     RESULT_CONT, RESULT_ERR, RESULT_OK, SESSION,
     STATUS, TASK, THINKING, TODO_ITEM, TODO_WRITE, TOOL_USE, WARNING,
     AgentNode, Event, RootNode, parse_log,
@@ -91,7 +91,8 @@ def _ex_message(text: str) -> str:
     return m.group(1) if m else text
 
 def _ex_tool(text: str, is_sub: bool) -> tuple[str, str]:
-    t = re.sub(r".*➣subagent\s*", "", text) if is_sub else re.sub(r"🔧\s*\[gladius\]\s*", "", text)
+    # Subagent tools: "🔧 [gladius] ➣<name> Bash  {args}" → strip up to agent badge
+    t = re.sub(r".*➣\w+\s*", "", text) if is_sub else re.sub(r"🔧\s*\[gladius\]\s*", "", text)
     if "  " in t:
         idx = t.index("  ")
         return t[:idx].strip(), t[idx + 2:].strip()
@@ -311,7 +312,6 @@ _KIND_DISPATCH = {
     RESULT_ERR:  lambda e: _r_result_group([e]),
     RESULT_CONT: lambda _: "",
     OTHER:       lambda _: "",
-    AGENT_LAUNCH: lambda _: "",
     TASK:         lambda _: "",
 }
 

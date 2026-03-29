@@ -18,7 +18,7 @@ from __future__ import annotations
 import pytest
 
 from gladius_parser.parser import (
-    AGENT_LAUNCH, AGENT_START, MESSAGE, RESULT_CONT, RESULT_ERR, RESULT_OK,
+    AGENT_START, MESSAGE, RESULT_CONT, RESULT_ERR, RESULT_OK,
     SESSION, STATUS, TASK, THINKING, TODO_ITEM, TODO_WRITE, TOOL_USE, WARNING,
     AgentNode, Event, RootNode, parse_log,
 )
@@ -27,83 +27,84 @@ from gladius_parser.parser import (
 
 _D = "2026-01-01"
 
-
-def _line(t: str, level: str, module: str, func: str, lno: int, msg: str) -> str:
-    return f"{_D} {t} | {level:<8} | {module}:{func}:{lno} - {msg}"
-
-
-def mk_agent_start(t="00:00:01.000", tools="Read"):
-    return _line(t, "DEBUG", "gladius.roles.agent_runner", "run_agent", 96,
-                 f"  \u25b6 [gladius]  tools=['{tools}']")
+# New format: "2026-01-01 HH:MM:SS.mmm LEVEL    [it=N at=N agent=NAME] msg"
+def _line(t: str, level: str, agent: str, msg: str, it: str = "1", at: str = "1") -> str:
+    return f"{_D} {t} {level:<8} [it={it} at={at} agent={agent}] {msg}"
 
 
-def mk_session(t="00:00:02.000", sid="sess1"):
-    return _line(t, "DEBUG", "gladius.roles._console", "_log_message", 90,
-                 f"  \U0001f511 [gladius] session={sid}")
+def mk_agent_start(t: str = "00:00:01.000", tools: str = "Read", agent: str = "gladius") -> str:
+    return _line(t, "DEBUG", agent, f"  \u25b6 [{agent}]  tools=['{tools}']")
 
 
-def mk_task(t: str, agent: str, title: str = "work"):
-    return _line(t, "DEBUG", "gladius.roles._console", "_log_tool_use", 158,
-                 f"  \U0001f916 [gladius] Task \u2192 {agent}  [{title}]  description")
+def mk_session(t: str = "00:00:02.000", sid: str = "sess1", agent: str = "gladius") -> str:
+    return _line(t, "DEBUG", agent, f"  \U0001f511 [{agent}] session={sid}")
 
 
-def mk_agent_dispatch(t: str, agent: str, title: str = "work"):
-    return _line(t, "DEBUG", "gladius.roles._console", "_log_tool_use", 168,
-                 f"  \U0001f916 [gladius] Agent \u2192 {agent}  [{title}]  description")
+def mk_task(t: str, agent_name: str, title: str = "work") -> str:
+    """Root orchestrator dispatches a Task (always logged under root agent)."""
+    return _line(t, "DEBUG", "gladius",
+                 f"  \U0001f916 [gladius] Task \u2192 {agent_name}  [{title}]  description")
 
 
-def mk_sub_tool(t: str, name: str = "Read"):
-    return _line(t, "DEBUG", "gladius.roles._console", "_log_tool_use", 165,
-                 f'  \U0001f527 [gladius] \u27a3subagent {name}  {{"arg": "val"}}')
+def mk_agent_dispatch(t: str, agent_name: str, title: str = "work") -> str:
+    """Root orchestrator dispatches an Agent (always logged under root agent)."""
+    return _line(t, "DEBUG", "gladius",
+                 f"  \U0001f916 [gladius] Agent \u2192 {agent_name}  [{title}]  description")
 
 
-def mk_root_tool(t: str, name: str = "Read"):
-    return _line(t, "DEBUG", "gladius.roles._console", "_log_tool_use", 165,
+def mk_sub_tool(t: str, name: str = "Read", sub_agent: str = "scout") -> str:
+    """A tool call made by a subagent — header shows the subagent's name."""
+    return _line(t, "DEBUG", sub_agent,
+                 f"  \U0001f527 [gladius] \u27a3{sub_agent} {name}  {{\"arg\": \"val\"}}",)
+
+
+def mk_root_tool(t: str, name: str = "Read") -> str:
+    """A direct tool call by the root orchestrator."""
+    return _line(t, "DEBUG", "gladius",
                  f'  \U0001f527 [gladius] {name}  {{"arg": "val"}}')
 
 
-def mk_result_ok(t: str, text: str = "ok result"):
-    return _line(t, "DEBUG", "gladius.roles._console", "_log_tool_result", 177,
-                 f"  \u2713 [gladius] {text}")
+def mk_result_ok(t: str, text: str = "ok result", agent: str = "scout") -> str:
+    return _line(t, "DEBUG", agent, f"  \u2713 [gladius] {text}")
 
 
-def mk_result_err(t: str, text: str = "error"):
-    return _line(t, "DEBUG", "gladius.roles._console", "_log_tool_result", 177,
-                 f"  \u2717 [gladius] {text}")
+def mk_result_err(t: str, text: str = "error", agent: str = "scout") -> str:
+    return _line(t, "DEBUG", agent, f"  \u2717 [gladius] {text}")
 
 
-def mk_result_cont(t: str, text: str = "2\u2192continuation"):
-    return _line(t, "DEBUG", "gladius.roles._console", "_log_tool_result", 177,
-                 f"       {text}")
+def mk_result_cont(t: str, text: str = "continuation", agent: str = "scout") -> str:
+    """Continuation line — plain indented text after a result; no emoji marker."""
+    return _line(t, "DEBUG", agent, f"      {text}")
 
 
-def mk_thinking(t: str, text: str = "thinking", sub: bool = False):
-    badge = " \u27a3subagent" if sub else ""
-    return _line(t, "DEBUG", "gladius.roles._console", "_log_message", 106,
-                 f"  \U0001f9e0 [gladius]{badge} (thinking) {text}")
+def mk_thinking(t: str, text: str = "thinking", sub: bool = False) -> str:
+    agent = "scout" if sub else "gladius"
+    return _line(t, "DEBUG", agent, f"  \U0001f9e0 [gladius] (thinking) {text}")
 
 
-def mk_message(t: str, text: str = "hello", sub: bool = False):
-    badge = " \u27a3subagent" if sub else ""
-    return _line(t, "DEBUG", "gladius.roles._console", "_log_message", 102,
-                 f"  \U0001f4ac [gladius]{badge} {text}")
+def mk_message(t: str, text: str = "hello", sub: bool = False) -> str:
+    agent = "scout" if sub else "gladius"
+    return _line(t, "DEBUG", agent, f"  \U0001f4ac [gladius] {text}")
 
 
-def mk_todo_write(t: str, n: int = 3, sub: bool = False):
-    badge = " \u27a3subagent" if sub else ""
-    return _line(t, "DEBUG", "gladius.roles._console", "_log_tool_use", 136,
-                 f"  \U0001f4cb [gladius]{badge} TodoWrite  0/{n} done")
+def mk_todo_write(t: str, n: int = 3, sub: bool = False) -> str:
+    agent = "scout" if sub else "gladius"
+    return _line(t, "DEBUG", agent, f"  \U0001f4cb [gladius] TodoWrite  0/{n} done")
 
 
-def mk_todo_item(t: str, text: str = "do it", done: bool = False):
+def mk_todo_item(t: str, text: str = "do it", done: bool = False,
+                 agent: str = "scout") -> str:
+    """TodoWrite item line — status emoji, no [gladius] marker."""
     icon = "\u2705" if done else "\u2b1c"
-    return _line(t, "DEBUG", "gladius.roles._console", "_log_tool_use", 143,
-                 f"       {icon}  {text}")
+    return _line(t, "DEBUG", agent, f"       {icon}  {text}")
 
 
-def mk_status(t: str = "23:59:59.000"):
-    return _line(t, "DEBUG", "gladius.roles._console", "_log_status", 122,
-                 "  \u2501\u2501\u2501\u2501\u2501 [gladius] done  status=OK")
+def mk_status(t: str = "23:59:59.000", agent: str = "gladius") -> str:
+    return _line(t, "DEBUG", agent, "  \u2501\u2501\u2501\u2501\u2501 [gladius] done  status=OK")
+
+
+def mk_warning(t: str, text: str, agent: str = "gladius") -> str:
+    return _line(t, "WARNING", agent, text)
 
 
 # ── tree-shape helpers ────────────────────────────────────────────────────────
@@ -249,8 +250,8 @@ class TestOrdering:
             mk_sub_tool("00:01:10.000"),
             mk_result_ok("00:01:11.000"),
             mk_todo_write("00:01:20.000"),
-            mk_todo_item("00:01:20.001", "step 1"),
-            mk_todo_item("00:01:20.002", "step 2"),
+            mk_todo_item("00:01:20.001", "step 1", agent="gladius"),
+            mk_todo_item("00:01:20.002", "step 2", agent="gladius"),
             mk_task("00:01:21.000", "agent-b"),
             mk_status(),
         ))
@@ -341,7 +342,7 @@ class TestRootToolCalls:
             mk_sub_tool("00:01:10.000"),        # subagent tool → in agent
             mk_result_ok("00:01:11.000"),        # → in agent
             mk_root_tool("00:01:20.000"),        # root tool → in root
-            mk_result_ok("00:01:21.000", "root result"),  # → in root
+            mk_result_ok("00:01:21.000", "root result", agent="gladius"),  # → in root
             mk_task("00:01:30.000", "agent-b"),
             mk_status(),
         ))
@@ -354,7 +355,7 @@ class TestRootToolCalls:
             mk_sub_tool("00:01:10.000"),
             mk_result_ok("00:01:11.000"),
             mk_root_tool("00:01:20.000"),
-            mk_result_ok("00:01:21.000"),
+            mk_result_ok("00:01:21.000", agent="gladius"),
             mk_task("00:01:30.000", "agent-b"),
             mk_status(),
         ))
@@ -578,8 +579,8 @@ class TestSubagentTodoItems:
             mk_sub_tool("00:01:05.000"),
             mk_result_ok("00:01:06.000"),
             mk_todo_write("00:01:20.000", 2, sub=False),   # root-level
-            mk_todo_item("00:01:20.001", "root step 1"),
-            mk_todo_item("00:01:20.002", "root step 2"),
+            mk_todo_item("00:01:20.001", "root step 1", agent="gladius"),
+            mk_todo_item("00:01:20.002", "root step 2", agent="gladius"),
             mk_task("00:02:00.000", "agent-b"),
             mk_status(),
         ))
@@ -668,8 +669,7 @@ class TestMultiIterationStatus:
             mk_sub_tool("00:01:10.000"),
             mk_result_ok("00:01:11.000"),
             mk_status("00:02:00.000"),
-            _line("00:02:01.000", "WARNING", "gladius.sdk", "run", 99,
-                  "forbidden tool attempt was blocked"),
+            mk_warning("00:02:01.000", "forbidden tool attempt was blocked"),
         ))
         epilogue_kinds = [e.kind for e in root.epilogue]
         assert STATUS in epilogue_kinds

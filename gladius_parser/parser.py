@@ -2,23 +2,24 @@
 
 The log represents a two-level agent hierarchy:
 
-  gladius (root orchestrator)
-  └── does its own tool calls / thinking / messages
-  └── Task → <agent-name>  ← opens a child node
-       └── ➣subagent tool calls / thinking / messages
-  └── resumes: more root-level events
-  └── Task → <next-agent>
-       └── ...
+    gladius (root orchestrator)
+    └── does its own tool calls / thinking / messages
+    └── Agent → <agent-name>  ← opens a child AgentNode
+             └── subagent tool calls / results
+    └── resumes: more root-level events
+    └── Agent → <next-agent>
+             └── ...
 
-Key encoding in the raw log
----------------------------
-  lineno 158 + 🤖       → Task dispatch  → opens a new AgentNode
-  lineno 165 + ➣subagent → tool call inside the current subagent
-  lineno 165 + no marker → root-level tool call
-  lineno 143             → TodoItem (belongs to whoever is active)
-  lineno 177             → tool result (belongs to whoever is active)
-  lineno 122 + ━━ done  → STATUS (run complete)
-  level=WARNING          → SDK warning
+Log format (new)
+----------------
+    TIMESTAMP LEVEL [it=N at=N agent=NAME] message
+
+    Where LEVEL is INFO/DEBUG/WARNING and agent=NAME tells us which agent
+    generated the line.  Events are classified solely from emoji / keyword
+    patterns in the message text; agent attribution uses the agent header field.
+
+    Subagent events have agent != root-agent-name (e.g. agent=scout).
+    Root events have agent == root-agent-name (e.g. agent=gladius).
 """
 
 from __future__ import annotations
@@ -30,7 +31,6 @@ from typing import Union
 
 # ── event kinds ───────────────────────────────────────────────────────────────
 
-AGENT_LAUNCH = "agent_launch"
 AGENT_START  = "agent_start"
 SESSION      = "session"
 TASK         = "task"
@@ -46,10 +46,12 @@ STATUS       = "status"
 WARNING      = "warning"
 OTHER        = "other"
 
-_ANSI_RE     = re.compile(r"\x1b\[[0-9;]*m")
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+# New log format: TIMESTAMP LEVEL [it=X at=X agent=NAME] message
 _LOG_LINE_RE = re.compile(
-    r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3}) \| (\w+)\s+\| "
-    r"([\w.]+):([\w_]+):(\d+) - (.*)$"
+    r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{3})\s+(\w+)\s+"
+    r"\[it=([^\s]+)\s+at=([^\s]+)\s+agent=([^\]]+)\](.*)"
 )
 
 
@@ -63,9 +65,9 @@ def _strip(s: str) -> str:
 class Event:
     ts: datetime
     level: str
-    module: str
-    func: str
-    lineno: int
+    it: str
+    at: str
+    agent: str
     kind: str
     is_subagent: bool
     text: str
@@ -155,79 +157,95 @@ class RootNode:
 
 # ── classification ────────────────────────────────────────────────────────────
 
-def _classify(lineno: int, text: str, module: str, func: str, level: str) -> tuple[str, bool]:
-    is_sub = "➣subagent" in text
-
-    if module == "gladius.orchestrator" and "Launching agent" in text:
-        return AGENT_LAUNCH, False
-    if func == "run_agent" and "▶" in text:
-        return AGENT_START, False
-    if "🔑" in text and "session" in text:
-        return SESSION, False
-    if "🤖" in text and ("Task →" in text or "Agent →" in text):
-        return TASK, False
-    if "🧠" in text and "(thinking)" in text:
-        return THINKING, is_sub
-    if "💬" in text:
-        return MESSAGE, is_sub
-    if "📋" in text and "TodoWrite" in text:
-        return TODO_WRITE, is_sub
-    if lineno == 143 or (
-        func == "_log_tool_use"
-        and text.strip()
-        and text.strip()[0] in ("✅", "⬜", "🔧")
-        and "[gladius]" not in text
-    ):
-        t = text.strip()
-        if t and t[0] in ("✅", "⬜", "🔧"):
-            return TODO_ITEM, is_sub
-    if "🔧" in text and "[gladius]" in text:
-        return TOOL_USE, is_sub
-    if lineno == 177 or func == "_log_tool_result":
-        t = text.strip()
-        if t.startswith("✓"):
-            return RESULT_OK, is_sub
-        if t.startswith("✗"):
-            return RESULT_ERR, is_sub
-        return RESULT_CONT, is_sub
-    if "━━" in text and "done" in text:
-        return STATUS, False
+def _classify(text: str, level: str) -> str:
+    """Classify the event kind from message content alone."""
+    t = text.strip()
+    if not t:
+        return OTHER
     if level == "WARNING":
-        return WARNING, False
-    return OTHER, False
+        return WARNING
+    if "🤖" in t and ("Task \u2192" in t or "Agent \u2192" in t):
+        return TASK
+    if "▶" in t:
+        return AGENT_START
+    if "🔑" in t and "session" in t:
+        return SESSION
+    if "🧠" in t and "(thinking)" in t:
+        return THINKING
+    if "💬" in t:
+        return MESSAGE
+    if "📋" in t and "TodoWrite" in t:
+        return TODO_WRITE
+    if "🔧" in t and "[gladius]" in t:
+        return TOOL_USE
+    # TODO_ITEM: status emoji without a [gladius] prefix (not a task-completion line)
+    if t.startswith(("✅", "⬜", "🔧")) and "[gladius]" not in t:
+        return TODO_ITEM
+    if t.startswith("✓"):
+        return RESULT_OK
+    if t.startswith("✗"):
+        return RESULT_ERR
+    if "━━" in t and "done" in t:
+        return STATUS
+    return OTHER
 
 
 # ── raw log → flat event list ─────────────────────────────────────────────────
 
 def _parse_events(content: str) -> list[Event]:
-    events: list[Event] = []
-    pending: re.Match | None = None
-    extra: list[str] = []
-
-    def flush() -> None:
-        if pending is None:
-            return
-        ts_str, level, module, func, lno, msg = pending.groups()
-        extra_txt = _strip(" ".join(extra))
-        raw = _strip(msg)
-        if extra_txt:
-            raw = (raw + " " + extra_txt).strip() if raw else extra_txt
-        ts     = datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S.%f")
-        lineno = int(lno)
-        kind, is_sub = _classify(lineno, raw, module, func, level)
-        events.append(Event(ts, level, module, func, lineno, kind, is_sub, raw))
-
+    """Parse every log line into an Event; detect root-agent from first AGENT_START."""
+    # Collect raw (ts_str, level, it, at, agent, msg) tuples first so we can
+    # determine the root-agent name before computing is_subagent.
+    raw: list[tuple[str, str, str, str, str, str]] = []
     for line in content.splitlines():
-        m = _LOG_LINE_RE.match(line)
-        if m:
-            flush()
-            pending = m
-            extra = []
-        else:
-            s = line.strip()
-            if s and not s.startswith("nohup:"):
-                extra.append(line)
-    flush()
+        s = _strip(line)
+        if not s or s.startswith("nohup:"):
+            continue
+        m = _LOG_LINE_RE.match(s)
+        if not m:
+            continue
+        ts_str, level, it, at, agent, msg = m.groups()
+        msg = msg.strip()
+        if msg:
+            raw.append((ts_str, level, it, at, agent, msg))
+
+    # Determine root agent (first line whose message contains ▶, i.e. AGENT_START).
+    root_agent = "gladius"
+    for _, _, _, _, agent, msg in raw:
+        if "▶" in msg:
+            root_agent = agent
+            break
+
+    non_root = {"-", "orchestrator", root_agent}
+    events: list[Event] = []
+    in_result = False  # True after RESULT_OK/ERR until next non-continuation event
+
+    for ts_str, level, it, at, agent, msg in raw:
+        ts   = datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S.%f")
+        kind = _classify(msg, level)
+
+        # Tool-output continuation: any unrecognised line immediately following a
+        # result, from a named agent, that isn't a hook/progress line.
+        if (
+            kind == OTHER
+            and in_result
+            and not msg.startswith("[gladius]")
+            and "⏳" not in msg
+            and "🚀" not in msg
+        ):
+            kind = RESULT_CONT
+
+        if kind in (RESULT_OK, RESULT_ERR):
+            in_result = True
+        elif kind != RESULT_CONT:
+            in_result = False
+
+        is_sub = agent not in non_root
+        events.append(Event(
+            ts=ts, level=level, it=it, at=at, agent=agent,
+            kind=kind, is_subagent=is_sub, text=msg,
+        ))
+
     return events
 
 
@@ -235,23 +253,24 @@ def _parse_events(content: str) -> list[Event]:
 
 def _build_tree(events: list[Event]) -> RootNode:
     """
-    State machine that assembles a RootNode from the flat event list.
+    Assemble a RootNode from the flat event list.
 
-    There is no "epilogue phase" — STATUS events occur once per iteration, not
-    just at the end of the whole run.  Instead we use two states:
+    is_subagent is already set correctly on every Event (agent header field),
+    so routing is simple: subagent events → current AgentNode; root events →
+    pending_root buffer (flushed into root.children after the agent closes).
 
-      seen_task=False  — preamble: events before any Task dispatch
-      seen_task=True   — events between / inside agent dispatches
+    States:
+      seen_task=False  — preamble: before the first Task dispatch
+      seen_task=True   — inside or between agent dispatches
 
-    At the end, any trailing non-AgentNode entries in root.children are peeled
-    off into root.epilogue so the renderer can give them a distinct label.
+    Trailing non-AgentNode entries in root.children are peeled into
+    root.epilogue so the renderer can give them a distinct label.
     """
+    # Root-agent name from the first AGENT_START event.
     agent_name = "gladius"
     for ev in events:
-        if ev.kind == AGENT_LAUNCH:
-            m = re.search(r"Launching agent:\s*(.*)", ev.text)
-            if m:
-                agent_name = m.group(1).strip()
+        if ev.kind == AGENT_START:
+            agent_name = ev.agent
             break
 
     root = RootNode(
@@ -262,9 +281,6 @@ def _build_tree(events: list[Event]) -> RootNode:
 
     current: AgentNode | None = None
     seen_task: bool = False
-    last_tool_was_sub: bool = False
-    last_todo_was_sub: bool = False
-    # Buffers root-level events that must appear AFTER the current AgentNode.
     pending_root: list[Event] = []
 
     def _flush_agent() -> None:
@@ -279,58 +295,23 @@ def _build_tree(events: list[Event]) -> RootNode:
         if ev.kind == OTHER:
             continue
 
-        # Every Task dispatch closes the previous agent and opens a new one.
         if ev.kind == TASK:
             _flush_agent()
             current = AgentNode(task_event=ev)
-            last_tool_was_sub = False
-            last_todo_was_sub = False
             seen_task = True
             continue
 
         if not seen_task:
-            # Preamble: before the very first Task dispatch.
             root.preamble.append(ev)
 
         elif current is not None:
-            # ── Inside an AgentNode ──────────────────────────────────────────
-            # TOOL_USE: subagent calls stay in the agent; root calls buffer.
-            if ev.kind == TOOL_USE:
-                last_tool_was_sub = ev.is_subagent
-                if ev.is_subagent:
-                    current.events.append(ev)
-                else:
-                    pending_root.append(ev)
-            # RESULT_*: inherit ownership from the preceding TOOL_USE.
-            elif ev.kind in (RESULT_OK, RESULT_ERR, RESULT_CONT):
-                if last_tool_was_sub:
-                    current.events.append(ev)
-                else:
-                    pending_root.append(ev)
-            # TODO_WRITE: track subagent flag for following TODO_ITEMs.
-            elif ev.kind == TODO_WRITE:
-                last_todo_was_sub = ev.is_subagent
-                if ev.is_subagent:
-                    current.events.append(ev)
-                else:
-                    pending_root.append(ev)
-            # TODO_ITEM: inherit ownership from the preceding TODO_WRITE.
-            elif ev.kind == TODO_ITEM:
-                if last_todo_was_sub:
-                    current.events.append(ev)
-                else:
-                    pending_root.append(ev)
-            # Subagent-tagged events (thinking, message…) belong to the agent.
-            elif ev.is_subagent:
+            # is_subagent is authoritative: route to agent or pending_root.
+            if ev.is_subagent:
                 current.events.append(ev)
             else:
-                # All orchestrator-level events (THINKING, MESSAGE, TODO_*,
-                # STATUS, AGENT_START, SESSION, AGENT_LAUNCH, WARNING…)
-                # must appear in root.children *after* the AgentNode.
                 pending_root.append(ev)
 
         else:
-            # ── Between agents (after STATUS or before next Task) ────────────
             pending_root.append(ev)
 
     _flush_agent()
